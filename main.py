@@ -1,380 +1,250 @@
+"""
+main.py
+-------
+Loop principale dell'applicazione Filtri Webcam AR.
+Gestisce: acquisizione frame, orchestrazione filtri, input tastiera,
+          registrazione video, screenshot, smoothing dei box facciali.
+
+Controlli tastiera:
+  C        – filtro colore successivo
+  F        – filtro facciale successivo
+  S        – salva screenshot (frame corrente con filtri)
+  V        – avvia / ferma registrazione video
+  D        – mostra / nascondi rettangoli di debug
+  R        – reset tutti i filtri a "Originale / Nessuno"
+  Q / ESC  – esci
+"""
+
 import cv2
 import numpy as np
+import time
 from datetime import datetime
-import os
+from collections import deque
+from pathlib import Path
 
-# ----------------------------------------------
-#  FUNZIONE PER SOVRAPPORRE UN'IMMAGINE CON ALPHA
-# ----------------------------------------------
-def overlay_image_alpha(frame, overlay, x, y, target_w, target_h):
-    """
-    Sovrappone un'immagine RGBA (con trasparenza) su frame.
-    x, y: coordinate dell'angolo in alto a sinistra dell'overlay.
-    target_w, target_h: dimensioni a cui ridimensionare overlay.
-    """
-    h_frame, w_frame = frame.shape[:2]
-    # Ridimensiona l'overlay mantenendo le proporzioni
-    overlay_resized = cv2.resize(overlay, (target_w, target_h), interpolation=cv2.INTER_AREA)
+from filters import FILTRI_COLORE
+from effects import (
+    rileva_facce, rileva_upper,
+    sfondo_sfocato,
+    overlay_cappello, overlay_occhiali, overlay_baffi, overlay_maschera,
+    ghost_effect, rilevamento_movimento, motion_blur,
+)
+from ui import disegna_hud, disegna_barra_filtri, disegna_etichette_facce
 
-    # Estrai canale alpha e normalizza
-    alpha_overlay = overlay_resized[:, :, 3] / 255.0
-    alpha_frame = 1.0 - alpha_overlay
-
-    # Definisci la regione del frame dove applicare l'overlay
-    x1 = max(x, 0)
-    y1 = max(y, 0)
-    x2 = min(x + target_w, w_frame)
-    y2 = min(y + target_h, h_frame)
-
-    if x2 <= x1 or y2 <= y1:
-        return  # fuori schermo
-
-    # Ritaglia overlay e alpha alla regione visibile
-    overlay_crop = overlay_resized[0:y2 - y1, 0:x2 - x1]
-    alpha_overlay_crop = alpha_overlay[0:y2 - y1, 0:x2 - x1]
-    alpha_frame_crop = alpha_frame[0:y2 - y1, 0:x2 - x1]
-
-    # Applica la miscelazione canale per canale
-    for c in range(3):
-        frame[y1:y2, x1:x2, c] = (
-            alpha_overlay_crop * overlay_crop[:, :, c] +
-            alpha_frame_crop * frame[y1:y2, x1:x2, c]
-        ).astype(np.uint8)
+# ------------------------------------------------------------------
+# Cartelle di output
+# ------------------------------------------------------------------
+FOTO_DIR  = Path("scatti");        FOTO_DIR.mkdir(exist_ok=True)
+VIDEO_DIR = Path("registrazioni"); VIDEO_DIR.mkdir(exist_ok=True)
 
 
-# ----------------------------------------------
-#  CARICAMENTO DELLE IMMAGINI DEI FILTRI
-# ----------------------------------------------
-# Metti qui i tuoi file PNG (con trasparenza).
-# Ogni filtro è un dizionario con:
-#   nome       -> etichetta visualizzata
-#   img        -> array numpy dell'immagine caricata
-#   placement  -> 'face' (centrato sul box faccia) o 'upper_body' (spalla sinistra)
-#   scale      -> fattore di scala rispetto alla larghezza faccia / upper body
-#   offset_y   -> spostamento verticale (frazione dell'altezza), positivo = in basso
-#                 (per 'face' il centro è il centro del box faccia)
-#   offset_x   -> spostamento orizzontale (frazione della larghezza)
-#                 (per 'upper_body' si usa per spostare a sinistra/destra)
-FILTRI_IMMAGINI = [
-    {
-        "nome": "Nessuno",
-        "img": None,
-        "placement": "face",
-        "scale": 0.0,
-        "offset_x": 0.0,
-        "offset_y": 0.0
-    },
-    {
-        "nome": "Cappello",
-        "img": cv2.imread("filtri/cappello.png", cv2.IMREAD_UNCHANGED),
-        "placement": "face",
-        "scale": 1.3,
-        "offset_x": 0.0,
-        "offset_y": -0.65   # sopra la testa
-    },
-    {
-        "nome": "Maschera",
-        "img": cv2.imread("filtri/maschera.png", cv2.IMREAD_UNCHANGED),
-        "placement": "face",
-        "scale": 1.1,
-        "offset_x": 0.0,
-        "offset_y": 0.3
-    },
-    {
-        "nome": "Occhiali",
-        "img": cv2.imread("filtri/occhiali.png", cv2.IMREAD_UNCHANGED),
-        "placement": "face",
-        "scale": 0.9,
-        "offset_x": 0.0,
-        "offset_y": -0.05
-    },
-    {
-        "nome": "Baffi",
-        "img": cv2.imread("filtri/baffi.png", cv2.IMREAD_UNCHANGED),
-        "placement": "face",
-        "scale": 0.3,
-        "offset_x": 0.0,
-        "offset_y": 0.2   # sotto il centro (bocca)
-    },
-    {
-        "nome": "Scudetto spalla",
-        "img": cv2.imread("filtri/scudetto.png", cv2.IMREAD_UNCHANGED),
-        "placement": "upper_body",
-        "scale": 0.15,
-        "offset_x": -0.3,   # sinistra rispetto al centro dell'upper body
-        "offset_y": 0.1
-    }
-]
-
-# Controlla che tutte le immagini siano state caricate correttamente
-for filtro in FILTRI_IMMAGINI:
-    if filtro["img"] is not None and filtro["img"].shape[2] != 4:
-        print(f"[WARNING] L'immagine '{filtro['nome']}' non ha canale alpha!")
-
-
-# ----------------------------------------------
-#  APPLICAZIONE FILTRO IMMAGINE SUI VOLTI
-# ----------------------------------------------
-def applica_filtro_immagine(frame, facce, upper_list, idx_filtro):
-    filtro = FILTRI_IMMAGINI[idx_filtro]
-    if filtro["img"] is None:
-        return
-
-    if filtro["placement"] == "face":
-        for (x, y, w, h) in facce:
-            # Calcola il punto centrale del volto
-            center_x = x + w // 2
-            center_y = y + h // 2
-
-            # Dimensioni desiderate dell'overlay
-            target_w = int(w * filtro["scale"])
-            if target_w <= 0:
-                continue
-            # Calcola altezza mantenendo il rapporto dell'immagine originale
-            ratio = filtro["img"].shape[0] / filtro["img"].shape[1]
-            target_h = int(target_w * ratio)
-
-            # Posizione finale: centro volto + offset
-            start_x = int(center_x - target_w // 2 + filtro["offset_x"] * w)
-            start_y = int(center_y - target_h // 2 + filtro["offset_y"] * h)
-
-            overlay_image_alpha(frame, filtro["img"], start_x, start_y, target_w, target_h)
-
-    elif filtro["placement"] == "upper_body":
-        for (ux, uy, uw, uh) in upper_list:
-            # Spalla sinistra (destra nel frame speculare, ma noi usiamo semplicemente la regione upper body)
-            center_x = ux + uw // 2
-            center_y = uy + uh // 2
-            target_w = int(uw * filtro["scale"])
-            if target_w <= 0:
-                continue
-            ratio = filtro["img"].shape[0] / filtro["img"].shape[1]
-            target_h = int(target_w * ratio)
-
-            start_x = int(center_x - target_w // 2 + filtro["offset_x"] * uw)
-            start_y = int(center_y - target_h // 2 + filtro["offset_y"] * uh)
-
-            overlay_image_alpha(frame, filtro["img"], start_x, start_y, target_w, target_h)
-
-
-# ----------------------------------------------
-#  FILTRI COLORE (invariati)
-# ----------------------------------------------
-def colore_nessuno(frame):
-    return frame
-
-def bianco_e_nero(frame):
-    grigio = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    return cv2.cvtColor(grigio, cv2.COLOR_GRAY2BGR)
-
-def seppia(frame):
-    grigio = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    norm = grigio.astype(np.float32) / 255.0
-    s = np.zeros_like(frame, dtype=np.float32)
-    s[:, :, 0] = norm * 112
-    s[:, :, 1] = norm * 156
-    s[:, :, 2] = norm * 200
-    return np.clip(s, 0, 255).astype(np.uint8)
-
-def negativo(frame):
-    return cv2.bitwise_not(frame)
-
-def calore(frame):
-    lut_r = np.clip(np.arange(256) * 1.2, 0, 255).astype(np.uint8)
-    lut_b = np.clip(np.arange(256) * 0.7, 0, 255).astype(np.uint8)
-    b, g, r = cv2.split(frame)
-    r = cv2.LUT(r, lut_r)
-    b = cv2.LUT(b, lut_b)
-    return cv2.merge([b, g, r])
-
-def freddo(frame):
-    lut_b = np.clip(np.arange(256) * 1.3, 0, 255).astype(np.uint8)
-    lut_r = np.clip(np.arange(256) * 0.7, 0, 255).astype(np.uint8)
-    b, g, r = cv2.split(frame)
-    b = cv2.LUT(b, lut_b)
-    r = cv2.LUT(r, lut_r)
-    return cv2.merge([b, g, r])
-
-def pixelato(frame, block=12):
-    h, w = frame.shape[:2]
-    small = cv2.resize(frame, (w // block, h // block), interpolation=cv2.INTER_NEAREST)
-    return cv2.resize(small, (w, h), interpolation=cv2.INTER_NEAREST)
-
-def sketch(frame):
-    grigio = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    blur = cv2.GaussianBlur(grigio, (21, 21), 0)
-    edges = cv2.divide(grigio, blur, scale=256)
-    return cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
-
-def vintage(frame):
-    sep = seppia(frame)
-    h, w = sep.shape[:2]
-    X, Y = np.meshgrid(np.linspace(-1, 1, w), np.linspace(-1, 1, h))
-    vignette = 1 - np.clip(np.sqrt(X ** 2 + Y ** 2) * 0.8, 0, 1)
-    vignette = vignette[:, :, np.newaxis]
-    return (sep * vignette).astype(np.uint8)
-
-FILTRI_COLORE = [
-    ("Originale", colore_nessuno),
-    ("B&N",       bianco_e_nero),
-    ("Seppia",    seppia),
-    ("Negativo",  negativo),
-    ("Calore",    calore),
-    ("Freddo",    freddo),
-    ("Pixelato",  pixelato),
-    ("Sketch",    sketch),
-    ("Vintage",   vintage),
+# ------------------------------------------------------------------
+# Filtri facciali disponibili
+# Ogni voce: (nome_breve, funzione(frame, facce) -> frame)
+# "nessuno" restituisce il frame invariato.
+# ------------------------------------------------------------------
+FILTRI_FACCIALI = [
+    ("Nessuno",          lambda f, fa: f),
+    ("Sfondo blur",      sfondo_sfocato),
+    ("Cappello",         overlay_cappello),
+    ("Occhiali",         overlay_occhiali),
+    ("Baffi",            overlay_baffi),
+    ("Maschera",         overlay_maschera),
+    ("Ghost",            lambda f, fa: ghost_effect(f, _prev_frame)),
+    ("Movimento",        lambda f, fa: rilevamento_movimento(f, _prev_frame)),
+    ("Motion blur",      lambda f, fa: motion_blur(f)),
 ]
 
 
-# ----------------------------------------------
-#  FUNZIONE PRINCIPALE (con registrazione video)
-# ----------------------------------------------
-def riconoscimento_real_time():
-    # Classificatori Haar
-    face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
-    upper_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_upperbody.xml")
+# ------------------------------------------------------------------
+# Smoothing dei box facciali (EMA)
+# ------------------------------------------------------------------
+class FaceSmoother:
+    """Smoothing esponenziale delle coordinate dei bounding box facciali."""
+
+    def __init__(self, alpha: float = 0.5, max_dist_px: int = 200):
+        self.alpha       = alpha
+        self.max_dist_sq = max_dist_px ** 2
+        self._history: dict[int, tuple] = {}
+        self._next_id = 0
+
+    def _center(self, b): return b[0] + b[2] // 2, b[1] + b[3] // 2
+
+    def _ema(self, new, old):
+        a = self.alpha
+        return tuple(int(a * n + (1 - a) * o) for n, o in zip(new, old))
+
+    def update(self, raw) -> list:
+        faces = [tuple(b) for b in raw] if len(raw) > 0 else []
+        if not faces:
+            self._history.clear()
+            return []
+        if not self._history:
+            for b in faces:
+                self._history[self._next_id] = b; self._next_id += 1
+            return faces
+
+        used, new_hist, smoothed = set(), {}, []
+        for box in faces:
+            cx, cy = self._center(box)
+            best_id, best_d = None, float("inf")
+            for oid, ob in self._history.items():
+                if oid in used: continue
+                ox, oy = self._center(ob)
+                d = (cx - ox)**2 + (cy - oy)**2
+                if d < best_d: best_d, best_id = d, oid
+            if best_id is not None and best_d < self.max_dist_sq:
+                sb = self._ema(box, self._history[best_id])
+                new_hist[best_id] = sb; used.add(best_id); smoothed.append(sb)
+            else:
+                nid = self._next_id; self._next_id += 1
+                new_hist[nid] = box; smoothed.append(box)
+        self._history = new_hist
+        return smoothed
+
+
+# ------------------------------------------------------------------
+# Variabile globale per il frame precedente (ghost / movimento)
+# ------------------------------------------------------------------
+_prev_frame: np.ndarray | None = None
+
+
+# ------------------------------------------------------------------
+# Funzione principale
+# ------------------------------------------------------------------
+def main() -> None:
+    global _prev_frame
+
+    face_cascade = cv2.CascadeClassifier(
+        cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
 
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
         print("[ERRORE] Webcam non accessibile.")
         return
 
-    # Stati dei filtri
-    idx_facciale = 0   # indice in FILTRI_IMMAGINI
-    idx_colore = 0     # indice in FILTRI_COLORE
+    smoother    = FaceSmoother(alpha=0.5)
+    idx_colore  = 0
+    idx_facciale = 0
+    recording   = False
+    video_writer: cv2.VideoWriter | None = None
+    show_debug  = False
 
-    # Stati registrazione video
-    recording = False
-    video_writer = None
+    # Misura FPS reali
+    frame_times: deque = deque(maxlen=30)
+    fps_display  = 0.0
 
-    print("=" * 55)
-    print("  Filtri Webcam AR – Immagini & Video")
-    print("  F = filtro successivo   C = colore successivo")
-    print("  S = scatta foto         V = registra/fine video")
-    print("  R = reset filtri        Q = esci")
-    print("=" * 55)
+    print("=" * 60)
+    print("  Filtri Webcam AR  |  avviato")
+    print("  C=colore  F=filtro  S=foto  V=video  D=debug  R=reset  Q=esci")
+    print("=" * 60)
 
     while True:
+        t0 = time.perf_counter()
+
         ret, frame = cap.read()
         if not ret:
+            print("[ERRORE] Frame non leggibile. Uscita.")
             break
 
         frame = cv2.flip(frame, 1)
-        h_frame, w_frame = frame.shape[:2]
+        h_fr, w_fr = frame.shape[:2]
 
-        # Converti in scala di grigi e equalizza
-        grigio = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        grigio_eq = cv2.equalizeHist(grigio)
+        # ── Rilevazione facce ──────────────────────────────────────
+        raw_faces = face_cascade.detectMultiScale(
+            cv2.equalizeHist(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)),
+            scaleFactor=1.15, minNeighbors=5, minSize=(60, 60))
+        facce = smoother.update(raw_faces)
 
-        # Rilevamento volti e upper body
-        facce = face_cascade.detectMultiScale(grigio_eq, scaleFactor=1.15,
-                                              minNeighbors=5, minSize=(60, 60))
-        upper_list = upper_cascade.detectMultiScale(grigio_eq, scaleFactor=1.2,
-                                                    minNeighbors=3, minSize=(80, 80))
+        # ── Filtro facciale ────────────────────────────────────────
+        nome_facciale, fn_facciale = FILTRI_FACCIALI[idx_facciale]
+        frame = fn_facciale(frame, facce)
 
-        # --- Applica filtro immagine (sovrapposto PRIMA del colore) ---
-        nome_f = FILTRI_IMMAGINI[idx_facciale]["nome"]
-        applica_filtro_immagine(frame, facce, upper_list, idx_facciale)
+        # ── Debug: rettangoli ──────────────────────────────────────
+        if show_debug:
+            for (x, y, w, h) in facce:
+                cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 1)
 
-        # Riquadro sottile intorno ai volti (opzionale)
-        for (x, y, w, h) in facce:
-            cv2.rectangle(frame, (x, y), (x + w, y + h), (255, 200, 0), 1)
-
-        # --- Applica filtro colore ---
-        nome_c, fn_colore = FILTRI_COLORE[idx_colore]
+        # ── Filtro colore ──────────────────────────────────────────
+        nome_colore, fn_colore = FILTRI_COLORE[idx_colore]
         frame = fn_colore(frame)
 
-        # --- Gestione registrazione video ---
+        # ── Registrazione (frame pulito, senza HUD) ────────────────
         if recording and video_writer is not None:
             video_writer.write(frame)
-            # Disegna un pallino rosso in alto a destra per indicare REC
-            cv2.circle(frame, (w_frame - 30, 30), 10, (0, 0, 255), -1)
 
-        # --- HUD (testo in sovrimpressione) ---
-        hud_bg = frame.copy()
-        cv2.rectangle(hud_bg, (0, 0), (w_frame, 90), (0, 0, 0), -1)
-        cv2.addWeighted(hud_bg, 0.45, frame, 0.55, 0, frame)
+        # ── Etichette facce ────────────────────────────────────────
+        disegna_etichette_facce(frame, facce)
 
-        cv2.putText(frame, f"Filtro: {nome_f}",
-                    (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 200), 2, cv2.LINE_AA)
-        cv2.putText(frame, f"Colore: {nome_c}",
-                    (10, 52), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (200, 255, 0), 2, cv2.LINE_AA)
-        status = "  V=rec" if not recording else "  REC in corso..."
-        cv2.putText(frame, f"Persone: {len(facce)} | F=filtro  C=colore  S=scatta  {status}  R=reset  Q=esci",
-                    (10, 78), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (200, 200, 200), 1, cv2.LINE_AA)
+        # ── HUD ────────────────────────────────────────────────────
+        disegna_hud(frame, nome_colore, nome_facciale,
+                    len(facce), fps_display, recording)
+
+        # ── Barra filtri colore in basso ───────────────────────────
+        nomi_colori = [n for n, _ in FILTRI_COLORE]
+        disegna_barra_filtri(frame, nomi_colori, idx_colore)
 
         cv2.imshow("Filtri Webcam AR", frame)
 
-        # --- Input da tastiera ---
+        # ── Aggiorna frame precedente ──────────────────────────────
+        _prev_frame = frame.copy()
+
+        # ── FPS reali ──────────────────────────────────────────────
+        frame_times.append(time.perf_counter() - t0)
+        if len(frame_times) == frame_times.maxlen:
+            fps_display = 1.0 / (sum(frame_times) / len(frame_times))
+
+        # ── Input tastiera ─────────────────────────────────────────
         key = cv2.waitKey(1) & 0xFF
 
-        if key == ord("q"):
+        if key in (ord("q"), 27):   # Q o ESC
             break
-
-        elif key == ord("f"):
-            idx_facciale = (idx_facciale + 1) % len(FILTRI_IMMAGINI)
-            print(f"Filtro facciale: {FILTRI_IMMAGINI[idx_facciale]['nome']}")
 
         elif key == ord("c"):
             idx_colore = (idx_colore + 1) % len(FILTRI_COLORE)
-            print(f"Filtro colore: {FILTRI_COLORE[idx_colore][0]}")
+            print(f"  → Colore: {FILTRI_COLORE[idx_colore][0]}")
+
+        elif key == ord("f"):
+            idx_facciale = (idx_facciale + 1) % len(FILTRI_FACCIALI)
+            print(f"  → Filtro facciale: {FILTRI_FACCIALI[idx_facciale][0]}")
 
         elif key == ord("r"):
-            idx_facciale = 0
-            idx_colore = 0
-            print("Reset filtri.")
+            idx_colore = 0; idx_facciale = 0
+            print("  → Reset filtri.")
+
+        elif key == ord("d"):
+            show_debug = not show_debug
+            print(f"  → Debug riquadri: {'ON' if show_debug else 'OFF'}")
 
         elif key == ord("s"):
-            # Scatta foto (senza HUD, ripetendo l'elaborazione)
-            ret2, f2 = cap.read()
-            if ret2:
-                f2 = cv2.flip(f2, 1)
-                g2 = cv2.cvtColor(f2, cv2.COLOR_BGR2GRAY)
-                g2_eq = cv2.equalizeHist(g2)
-                facce2 = face_cascade.detectMultiScale(g2_eq, scaleFactor=1.15, minNeighbors=5, minSize=(60,60))
-                upper2 = upper_cascade.detectMultiScale(g2_eq, scaleFactor=1.2, minNeighbors=3, minSize=(80,80))
-                applica_filtro_immagine(f2, facce2, upper2, idx_facciale)
-                f2 = fn_colore(f2)
-                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                nome = f"foto_{nome_f}_{nome_c}_{ts}.jpg"
-                cv2.imwrite(nome, f2)
-                print(f"Foto salvata: {nome}")
+            # Salva il frame già filtrato (quello visibile a schermo)
+            ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
+            nome = FOTO_DIR / f"foto_{nome_colore}_{nome_facciale}_{ts}.jpg"
+            cv2.imwrite(str(nome), frame)
+            print(f"  → Foto salvata: {nome}")
 
         elif key == ord("v"):
-            # Toggle registrazione video
             if not recording:
-                # Inizia registrazione
-                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                nome_video = f"video_{nome_f}_{nome_c}_{ts}.mp4"
-                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-                fps = cap.get(cv2.CAP_PROP_FPS)
-                if fps <= 0:
-                    fps = 20  # fallback
-                video_writer = cv2.VideoWriter(nome_video, fourcc, fps,
-                                               (w_frame, h_frame))
+                ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
+                path = VIDEO_DIR / f"video_{nome_colore}_{nome_facciale}_{ts}.mp4"
+                fps_rec = fps_display if fps_display > 1 else 20.0
+                video_writer = cv2.VideoWriter(
+                    str(path), cv2.VideoWriter_fourcc(*"mp4v"),
+                    round(fps_rec), (w_fr, h_fr))
                 recording = True
-                print(f"Registrazione video iniziata: {nome_video}")
+                print(f"  → REC avviata: {path}  ({fps_rec:.1f} FPS)")
             else:
-                # Ferma registrazione
                 recording = False
                 if video_writer:
-                    video_writer.release()
-                    video_writer = None
-                print("Registrazione video fermata.")
+                    video_writer.release(); video_writer = None
+                print("  → REC fermata.")
 
-    # Pulisci all'uscita
+    # ── Pulizia risorse ────────────────────────────────────────────
     if recording and video_writer:
         video_writer.release()
     cap.release()
     cv2.destroyAllWindows()
-
-
-def main():
-    print("=" * 55)
-    print("   Filtri Webcam AR – Immagini PNG & Video")
-    print("=" * 55)
-    riconoscimento_real_time()
+    print("Programma terminato.")
 
 
 if __name__ == "__main__":
