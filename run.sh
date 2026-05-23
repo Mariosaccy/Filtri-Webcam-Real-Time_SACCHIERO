@@ -1,34 +1,32 @@
 #!/usr/bin/env bash
-# ============================================================
-#  run.sh  –  Avvio Filtri Webcam AR
-#  Uso: bash run.sh
-# ============================================================
+# run.sh — avvia l'applicazione filtri webcam ar
+# uso: bash run.sh
 
-set -e   # interrompi se un comando fallisce
+set -e   # se un comando fallisce, lo script si ferma
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
+# vai nella cartella dove si trova questo script
+cd "$(dirname "${BASH_SOURCE[0]}")"
 
-# Crea e attiva virtualenv se non esiste già
+# crea il virtualenv se non esiste ancora
 if [ ! -d "venv" ]; then
-    echo "[setup] Creazione virtualenv..."
+    echo "[setup] creo il virtualenv..."
     python3 -m venv venv
 fi
 
-# Attiva il virtualenv
+# attiva il virtualenv
 source venv/bin/activate
 
-# Installa / aggiorna dipendenze
-echo "[setup] Installazione dipendenze..."
+# installa le dipendenze (salta quelle già installate)
+echo "[setup] installo le dipendenze..."
 pip install --quiet -r requirements.txt
 
-# Crea cartella assets se non esiste (placeholder avvisa l'utente)
+# crea le cartelle necessarie se non esistono
 mkdir -p assets scatti registrazioni
 
 echo ""
 echo "============================================"
-echo "  Filtri Webcam AR  –  avvio in corso..."
-echo "  Premi Q o ESC nella finestra per uscire."
+echo "  filtri webcam ar — in avvio..."
+echo "  premi Q nella finestra per uscire"
 echo "============================================"
 echo ""
 

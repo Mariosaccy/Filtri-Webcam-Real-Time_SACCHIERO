@@ -1,2 +1,8 @@
+# dipendenze obbligatorie
 opencv-python>=4.8.0
 numpy>=1.24.0
+
+# opzionale: serve solo se vuoi usare la webcam virtuale (WEBCAM_VIRTUALE = True in main.py)
+# installa con: pip install pyvirtualcam
+# su linux serve anche: sudo modprobe v4l2loopback
+# pyvirtualcam>=0.10.0

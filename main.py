@@ -1,250 +1,298 @@
-"""
-main.py
--------
-Loop principale dell'applicazione Filtri Webcam AR.
-Gestisce: acquisizione frame, orchestrazione filtri, input tastiera,
-          registrazione video, screenshot, smoothing dei box facciali.
-
-Controlli tastiera:
-  C        – filtro colore successivo
-  F        – filtro facciale successivo
-  S        – salva screenshot (frame corrente con filtri)
-  V        – avvia / ferma registrazione video
-  D        – mostra / nascondi rettangoli di debug
-  R        – reset tutti i filtri a "Originale / Nessuno"
-  Q / ESC  – esci
-"""
+# main.py
+# questo è il file principale: avvia la webcam, gestisce i tasti,
+# chiama i filtri giusti e mostra il risultato a schermo
+#
+# opzionalmente può mandare il video a una webcam virtuale (come obs virtual camera)
+# così puoi usare l'app su meet, zoom, ecc. — vedi il readme per come attivarlo
 
 import cv2
-import numpy as np
 import time
+import sys
 from datetime import datetime
 from collections import deque
 from pathlib import Path
 
 from filters import FILTRI_COLORE
 from effects import (
-    rileva_facce, rileva_upper,
+    rileva_facce,
     sfondo_sfocato,
-    overlay_cappello, overlay_occhiali, overlay_baffi, overlay_maschera,
-    ghost_effect, rilevamento_movimento, motion_blur,
+    metti_cappello,
+    metti_occhiali,
+    metti_baffi,
+    metti_maschera,
+    ghost_effect,
+    rilevamento_movimento,
 )
-from ui import disegna_hud, disegna_barra_filtri, disegna_etichette_facce
-
-# ------------------------------------------------------------------
-# Cartelle di output
-# ------------------------------------------------------------------
-FOTO_DIR  = Path("scatti");        FOTO_DIR.mkdir(exist_ok=True)
-VIDEO_DIR = Path("registrazioni"); VIDEO_DIR.mkdir(exist_ok=True)
+from ui import disegna_hud, disegna_barra_filtri, disegna_etichette
 
 
-# ------------------------------------------------------------------
-# Filtri facciali disponibili
-# Ogni voce: (nome_breve, funzione(frame, facce) -> frame)
-# "nessuno" restituisce il frame invariato.
-# ------------------------------------------------------------------
+# ─────────────────────────────────────────────
+#  webcam virtuale (opzionale)
+#  imposta WEBCAM_VIRTUALE = True per attivare
+#  richiede: pip install pyvirtualcam
+#  su linux richiede anche il modulo v4l2loopback (vedi readme)
+# ─────────────────────────────────────────────
+
+WEBCAM_VIRTUALE = True   # cambia in True per attivare la webcam virtuale
+
+# prova a importare pyvirtualcam solo se l'utente vuole usarla
+cam_virtuale = None
+if WEBCAM_VIRTUALE:
+    try:
+        import pyvirtualcam
+        print("[webcam virtuale] pyvirtualcam trovato, verrà attivata")
+    except ImportError:
+        print("[webcam virtuale] pyvirtualcam non installato — esegui: pip install pyvirtualcam")
+        print("[webcam virtuale] continuo senza webcam virtuale")
+        WEBCAM_VIRTUALE = False
+
+
+# ─────────────────────────────────────────────
+#  cartelle di output
+# ─────────────────────────────────────────────
+
+CARTELLA_FOTO  = Path("scatti");        CARTELLA_FOTO.mkdir(exist_ok=True)
+CARTELLA_VIDEO = Path("registrazioni"); CARTELLA_VIDEO.mkdir(exist_ok=True)
+
+
+# ─────────────────────────────────────────────
+#  lista dei filtri facciali disponibili
+#  ogni voce è (nome da mostrare, tipo di effetto)
+#  i tipi con variante (cappello, maschera, baffi) si cambiano con i tasti 1-4
+# ─────────────────────────────────────────────
+
 FILTRI_FACCIALI = [
-    ("Nessuno",          lambda f, fa: f),
-    ("Sfondo blur",      sfondo_sfocato),
-    ("Cappello",         overlay_cappello),
-    ("Occhiali",         overlay_occhiali),
-    ("Baffi",            overlay_baffi),
-    ("Maschera",         overlay_maschera),
-    ("Ghost",            lambda f, fa: ghost_effect(f, _prev_frame)),
-    ("Movimento",        lambda f, fa: rilevamento_movimento(f, _prev_frame)),
-    ("Motion blur",      lambda f, fa: motion_blur(f)),
+    "nessuno",          # nessun effetto sulla faccia
+    "sfondo_sfocato",   # sfoca lo sfondo mantenendo nitida la faccia
+    "cappello",         # cappello sopra la testa (varianti 1-4)
+    "occhiali",         # occhiali all'altezza degli occhi
+    "baffi",            # baffi sotto il naso (varianti 1-4)
+    "maschera",         # maschera sull'intera faccia (varianti 1-4)
+    "ghost",            # effetto scia del frame precedente
+    "movimento",        # evidenzia in rosso le zone in movimento
 ]
 
-
-# ------------------------------------------------------------------
-# Smoothing dei box facciali (EMA)
-# ------------------------------------------------------------------
-class FaceSmoother:
-    """Smoothing esponenziale delle coordinate dei bounding box facciali."""
-
-    def __init__(self, alpha: float = 0.5, max_dist_px: int = 200):
-        self.alpha       = alpha
-        self.max_dist_sq = max_dist_px ** 2
-        self._history: dict[int, tuple] = {}
-        self._next_id = 0
-
-    def _center(self, b): return b[0] + b[2] // 2, b[1] + b[3] // 2
-
-    def _ema(self, new, old):
-        a = self.alpha
-        return tuple(int(a * n + (1 - a) * o) for n, o in zip(new, old))
-
-    def update(self, raw) -> list:
-        faces = [tuple(b) for b in raw] if len(raw) > 0 else []
-        if not faces:
-            self._history.clear()
-            return []
-        if not self._history:
-            for b in faces:
-                self._history[self._next_id] = b; self._next_id += 1
-            return faces
-
-        used, new_hist, smoothed = set(), {}, []
-        for box in faces:
-            cx, cy = self._center(box)
-            best_id, best_d = None, float("inf")
-            for oid, ob in self._history.items():
-                if oid in used: continue
-                ox, oy = self._center(ob)
-                d = (cx - ox)**2 + (cy - oy)**2
-                if d < best_d: best_d, best_id = d, oid
-            if best_id is not None and best_d < self.max_dist_sq:
-                sb = self._ema(box, self._history[best_id])
-                new_hist[best_id] = sb; used.add(best_id); smoothed.append(sb)
-            else:
-                nid = self._next_id; self._next_id += 1
-                new_hist[nid] = box; smoothed.append(box)
-        self._history = new_hist
-        return smoothed
+# nomi "belli" da mostrare nella HUD
+NOMI_FACCIALI = {
+    "nessuno":        "nessuno",
+    "sfondo_sfocato": "sfondo blur",
+    "cappello":       "cappello",
+    "occhiali":       "occhiali",
+    "baffi":          "baffi",
+    "maschera":       "maschera",
+    "ghost":          "ghost",
+    "movimento":      "movimento",
+}
 
 
-# ------------------------------------------------------------------
-# Variabile globale per il frame precedente (ghost / movimento)
-# ------------------------------------------------------------------
-_prev_frame: np.ndarray | None = None
+# ─────────────────────────────────────────────
+#  funzione principale
+# ─────────────────────────────────────────────
 
-
-# ------------------------------------------------------------------
-# Funzione principale
-# ------------------------------------------------------------------
-def main() -> None:
-    global _prev_frame
-
-    face_cascade = cv2.CascadeClassifier(
-        cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
-
+def main():
+    # apri la webcam (0 = prima webcam disponibile)
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
-        print("[ERRORE] Webcam non accessibile.")
-        return
+        print("[errore] non riesco ad aprire la webcam")
+        sys.exit(1)
 
-    smoother    = FaceSmoother(alpha=0.5)
-    idx_colore  = 0
-    idx_facciale = 0
-    recording   = False
-    video_writer: cv2.VideoWriter | None = None
-    show_debug  = False
+    # leggi la risoluzione della webcam (serve per la registrazione video)
+    w_cam = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h_cam = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-    # Misura FPS reali
-    frame_times: deque = deque(maxlen=30)
-    fps_display  = 0.0
+    # indici dei filtri attivi (si cambiano con i tasti C e F)
+    idx_colore   = 0   # quale filtro colore è attivo
+    idx_facciale = 0   # quale filtro facciale è attivo
+    variante     = 0   # variante 0-3 per cappello/maschera/baffi (tasti 1-4)
+
+    # stato della registrazione video
+    recording    = False
+    video_writer = None
+
+    # mostrare i rettangoli di debug attorno alle facce?
+    show_debug = False
+
+    # il frame precedente serve per ghost e rilevamento movimento
+    frame_precedente = None
+
+    # coda degli ultimi 30 tempi di frame per calcolare gli fps reali
+    tempi_frame = deque(maxlen=30)
+    fps_display = 0.0
+
+    # se l'utente vuole la webcam virtuale, la apriamo ora
+    global cam_virtuale
+    if WEBCAM_VIRTUALE:
+        try:
+            cam_virtuale = pyvirtualcam.Camera(width=w_cam, height=h_cam, fps=30)
+            print(f"[webcam virtuale] attiva su: {cam_virtuale.device}")
+            print("[webcam virtuale] selezionala in meet/zoom come 'virtual camera'")
+        except Exception as e:
+            print(f"[webcam virtuale] errore nell'apertura: {e}")
+            cam_virtuale = None
 
     print("=" * 60)
-    print("  Filtri Webcam AR  |  avviato")
-    print("  C=colore  F=filtro  S=foto  V=video  D=debug  R=reset  Q=esci")
+    print("  filtri webcam ar — avviato")
+    print("  c=colore  f=filtro  1-4=variante  s=foto  v=video  q=esci")
     print("=" * 60)
 
     while True:
-        t0 = time.perf_counter()
+        t_inizio = time.perf_counter()   # segna il tempo di inizio del frame
 
+        # leggi un frame dalla webcam
         ret, frame = cap.read()
         if not ret:
-            print("[ERRORE] Frame non leggibile. Uscita.")
+            print("[errore] impossibile leggere il frame, esco")
             break
 
+        # capovolgi orizzontalmente: così sembra uno specchio (più naturale per una webcam)
         frame = cv2.flip(frame, 1)
-        h_fr, w_fr = frame.shape[:2]
 
-        # ── Rilevazione facce ──────────────────────────────────────
-        raw_faces = face_cascade.detectMultiScale(
-            cv2.equalizeHist(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)),
-            scaleFactor=1.15, minNeighbors=5, minSize=(60, 60))
-        facce = smoother.update(raw_faces)
+        # rileva i volti nel frame corrente
+        facce = rileva_facce(frame)
 
-        # ── Filtro facciale ────────────────────────────────────────
-        nome_facciale, fn_facciale = FILTRI_FACCIALI[idx_facciale]
-        frame = fn_facciale(frame, facce)
+        # ── applica il filtro facciale attivo ───────────────────
+        tipo = FILTRI_FACCIALI[idx_facciale]
 
-        # ── Debug: rettangoli ──────────────────────────────────────
+        if tipo == "nessuno":
+            pass   # non fare niente
+
+        elif tipo == "sfondo_sfocato":
+            frame = sfondo_sfocato(frame, facce)
+
+        elif tipo == "cappello":
+            frame = metti_cappello(frame, facce, variante)
+
+        elif tipo == "occhiali":
+            frame = metti_occhiali(frame, facce)
+
+        elif tipo == "baffi":
+            frame = metti_baffi(frame, facce, variante)
+
+        elif tipo == "maschera":
+            frame = metti_maschera(frame, facce, variante)
+
+        elif tipo == "ghost":
+            frame = ghost_effect(frame, frame_precedente)
+
+        elif tipo == "movimento":
+            frame = rilevamento_movimento(frame, frame_precedente)
+
+        # ── mostra i rettangoli di debug (solo se D è premuto) ──
         if show_debug:
             for (x, y, w, h) in facce:
                 cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 1)
 
-        # ── Filtro colore ──────────────────────────────────────────
+        # ── applica il filtro colore attivo ──────────────────────
         nome_colore, fn_colore = FILTRI_COLORE[idx_colore]
         frame = fn_colore(frame)
 
-        # ── Registrazione (frame pulito, senza HUD) ────────────────
+        # ── scrivi nel video PRIMA di aggiungere hud e grafica ───
+        # così il video registrato è pulito senza barre e testi sopra
         if recording and video_writer is not None:
             video_writer.write(frame)
 
-        # ── Etichette facce ────────────────────────────────────────
-        disegna_etichette_facce(frame, facce)
+        # ── manda il frame alla webcam virtuale (se attiva) ──────
+        if cam_virtuale is not None:
+            # pyvirtualcam vuole rgb, opencv usa bgr → convertiamo
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            cam_virtuale.send(frame_rgb)
+            cam_virtuale.sleep_until_next_frame()
 
-        # ── HUD ────────────────────────────────────────────────────
-        disegna_hud(frame, nome_colore, nome_facciale,
-                    len(facce), fps_display, recording)
+        # ── aggiungi le etichette sopra le facce ─────────────────
+        disegna_etichette(frame, facce)
 
-        # ── Barra filtri colore in basso ───────────────────────────
+        # ── disegna la barra in alto con le info (hud) ───────────
+        nome_facciale = NOMI_FACCIALI[tipo]
+        # se il filtro ha varianti, mostra anche quale variante è attiva
+        if tipo in ("cappello", "maschera", "baffi"):
+            nome_facciale += f" {variante + 1}"
+        disegna_hud(frame, nome_colore, nome_facciale, len(facce), fps_display, recording)
+
+        # ── disegna la barra in basso con i filtri colore ────────
         nomi_colori = [n for n, _ in FILTRI_COLORE]
         disegna_barra_filtri(frame, nomi_colori, idx_colore)
 
-        cv2.imshow("Filtri Webcam AR", frame)
+        # ── mostra il frame finale nella finestra ─────────────────
+        cv2.imshow("filtri webcam ar", frame)
 
-        # ── Aggiorna frame precedente ──────────────────────────────
-        _prev_frame = frame.copy()
+        # salva il frame come "frame precedente" per il prossimo ciclo
+        frame_precedente = frame.copy()
 
-        # ── FPS reali ──────────────────────────────────────────────
-        frame_times.append(time.perf_counter() - t0)
-        if len(frame_times) == frame_times.maxlen:
-            fps_display = 1.0 / (sum(frame_times) / len(frame_times))
+        # ── calcolo fps reali ─────────────────────────────────────
+        tempi_frame.append(time.perf_counter() - t_inizio)
+        if len(tempi_frame) == tempi_frame.maxlen:
+            fps_display = 1.0 / (sum(tempi_frame) / len(tempi_frame))
 
-        # ── Input tastiera ─────────────────────────────────────────
-        key = cv2.waitKey(1) & 0xFF
+        # ── gestione tasti ────────────────────────────────────────
+        tasto = cv2.waitKey(1) & 0xFF
 
-        if key in (ord("q"), 27):   # Q o ESC
+        if tasto in (ord("q"), 27):   # q oppure esc per uscire
             break
 
-        elif key == ord("c"):
+        elif tasto == ord("c"):
+            # passa al filtro colore successivo (ciclo circolare)
             idx_colore = (idx_colore + 1) % len(FILTRI_COLORE)
-            print(f"  → Colore: {FILTRI_COLORE[idx_colore][0]}")
+            print(f"  → colore: {FILTRI_COLORE[idx_colore][0]}")
 
-        elif key == ord("f"):
+        elif tasto == ord("f"):
+            # passa al filtro facciale successivo (ciclo circolare)
             idx_facciale = (idx_facciale + 1) % len(FILTRI_FACCIALI)
-            print(f"  → Filtro facciale: {FILTRI_FACCIALI[idx_facciale][0]}")
+            variante = 0   # reset variante quando cambi filtro
+            print(f"  → filtro: {FILTRI_FACCIALI[idx_facciale]}")
 
-        elif key == ord("r"):
-            idx_colore = 0; idx_facciale = 0
-            print("  → Reset filtri.")
+        elif tasto in (ord("1"), ord("2"), ord("3"), ord("4")):
+            # cambia variante per cappello, maschera e baffi
+            variante = tasto - ord("1")   # "1" → 0, "2" → 1, "3" → 2, "4" → 3
+            print(f"  → variante {variante + 1}")
 
-        elif key == ord("d"):
+        elif tasto == ord("r"):
+            # reset: torna ai filtri di default
+            idx_colore = 0
+            idx_facciale = 0
+            variante = 0
+            print("  → reset filtri")
+
+        elif tasto == ord("d"):
+            # mostra/nascondi i rettangoli attorno alle facce rilevate
             show_debug = not show_debug
-            print(f"  → Debug riquadri: {'ON' if show_debug else 'OFF'}")
+            print(f"  → debug: {'on' if show_debug else 'off'}")
 
-        elif key == ord("s"):
-            # Salva il frame già filtrato (quello visibile a schermo)
-            ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
-            nome = FOTO_DIR / f"foto_{nome_colore}_{nome_facciale}_{ts}.jpg"
-            cv2.imwrite(str(nome), frame)
-            print(f"  → Foto salvata: {nome}")
+        elif tasto == ord("s"):
+            # salva uno screenshot del frame attuale (già con tutti i filtri applicati)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            percorso  = CARTELLA_FOTO / f"foto_{nome_colore}_{nome_facciale}_{timestamp}.jpg"
+            cv2.imwrite(str(percorso), frame)
+            print(f"  → foto salvata: {percorso}")
 
-        elif key == ord("v"):
+        elif tasto == ord("v"):
             if not recording:
-                ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
-                path = VIDEO_DIR / f"video_{nome_colore}_{nome_facciale}_{ts}.mp4"
-                fps_rec = fps_display if fps_display > 1 else 20.0
+                # avvia la registrazione video
+                timestamp  = datetime.now().strftime("%Y%m%d_%H%M%S")
+                percorso   = CARTELLA_VIDEO / f"video_{nome_colore}_{nome_facciale}_{timestamp}.mp4"
+                fps_rec    = fps_display if fps_display > 1 else 20.0
+                # mp4v è il codec per file .mp4 — funziona su tutti i sistemi
                 video_writer = cv2.VideoWriter(
-                    str(path), cv2.VideoWriter_fourcc(*"mp4v"),
-                    round(fps_rec), (w_fr, h_fr))
+                    str(percorso), cv2.VideoWriter_fourcc(*"mp4v"),
+                    round(fps_rec), (w_cam, h_cam))
                 recording = True
-                print(f"  → REC avviata: {path}  ({fps_rec:.1f} FPS)")
+                print(f"  → registrazione avviata: {percorso}")
             else:
+                # ferma la registrazione e chiude il file
                 recording = False
                 if video_writer:
-                    video_writer.release(); video_writer = None
-                print("  → REC fermata.")
+                    video_writer.release()
+                    video_writer = None
+                print("  → registrazione fermata")
 
-    # ── Pulizia risorse ────────────────────────────────────────────
+    # ── pulizia finale ────────────────────────────────────────────
+    # rilascia tutte le risorse quando il programma finisce
     if recording and video_writer:
         video_writer.release()
+    if cam_virtuale:
+        cam_virtuale.close()
     cap.release()
     cv2.destroyAllWindows()
-    print("Programma terminato.")
+    print("programma terminato")
 
 
 if __name__ == "__main__":

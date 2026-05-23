@@ -1,156 +1,218 @@
-# Filtri Webcam AR
+# filtri webcam ar
 
-Applicazione desktop Python che accede alla webcam in tempo reale e permette di applicare filtri colore, effetti visivi e overlay facciali interattivi. Tutto viene controllato da tastiera mentre la webcam è attiva.
+applicazione desktop python che accede alla webcam in tempo reale e permette di applicare filtri colore, effetti visivi e overlay facciali. tutto si controlla da tastiera.
+
+supporta anche la **webcam virtuale**: il feed filtrato può essere mandato a un dispositivo webcam virtuale, così lo puoi selezionare in google meet, zoom, teams ecc. come se fosse una vera webcam.
 
 ---
 
-## Requisiti
+## requisiti
 
-| Voce | Dettaglio |
+| voce | dettaglio |
 |------|-----------|
-| Sistema operativo | Linux, macOS, Windows 10/11 |
-| Python | 3.10 o superiore |
-| Hardware | Webcam USB o integrata |
-| Dipendenze | `opencv-python`, `numpy` (installate automaticamente) |
+| sistema operativo | linux, macos, windows 10/11 |
+| python | 3.10 o superiore |
+| hardware | webcam usb o integrata |
+| dipendenze | `opencv-python`, `numpy` (installate automaticamente) |
 
 ---
 
-## Installazione step by step
+## installazione
 
-### 1. Clona il repository
+### 1. clona il repository
 
 ```bash
 git clone https://github.com/tuo-utente/filtri-webcam-ar.git
 cd filtri-webcam-ar
 ```
 
-### 2. Aggiungi le immagini dei filtri
+### 2. aggiungi le immagini degli overlay
 
-Copia nella cartella `assets/` i file PNG **con canale alpha (RGBA)**:
+metti nella cartella `assets/` i file png **con canale alpha (rgba)**:
 
 ```
 assets/
-├── cappello.png
+├── cappello.png     ← usato per cappello 1, 2, 3, 4 finché non aggiungi le varianti
 ├── occhiali.png
 ├── baffi.png
 └── maschera.png
 ```
 
-> Se un file manca il programma avvisa nella console e disabilita solo quel filtro — non crasha.
+> per aggiungere le 4 varianti, basta aggiungere `cappello2.png`, `cappello3.png`, `cappello4.png`
+> e modificare i nomi in `effects.py` nella lista `CAPPELLI`. stessa cosa per maschera e baffi.
 
-### 3. Avvio rapido (consigliato)
+se un file manca il programma avvisa nella console e disabilita solo quel filtro, non crasha.
+
+### 3. avvio rapido
 
 ```bash
 bash run.sh
 ```
 
-Lo script crea automaticamente un virtualenv, installa le dipendenze e avvia l'applicazione.
+lo script crea automaticamente un virtualenv, installa le dipendenze e avvia l'app.
 
-### 4. Avvio manuale (alternativa)
+### 4. avvio manuale (alternativa)
 
 ```bash
 python3 -m venv venv
-source venv/bin/activate          # Windows: venv\Scripts\activate
+source venv/bin/activate       # su windows: venv\Scripts\activate
 pip install -r requirements.txt
 python main.py
 ```
 
 ---
 
-## Tasti disponibili
+## tasti disponibili
 
-| Tasto | Azione |
+| tasto | azione |
 |-------|--------|
-| **C** | Filtro colore successivo (ciclo) |
-| **F** | Filtro facciale successivo (ciclo) |
-| **S** | Salva screenshot con data/ora in `scatti/` |
-| **V** | Avvia / ferma registrazione video in `registrazioni/` |
-| **D** | Mostra / nascondi rettangoli di debug face detection |
-| **R** | Reset: torna a "Originale" e "Nessuno" |
-| **Q** / **ESC** | Esci e rilascia la webcam |
+| **c** | filtro colore successivo (ciclo tra tutti) |
+| **f** | filtro facciale successivo (ciclo tra tutti) |
+| **1 2 3 4** | cambia variante di cappello / maschera / baffi |
+| **s** | salva screenshot con data e ora in `scatti/` |
+| **v** | avvia / ferma registrazione video in `registrazioni/` |
+| **d** | mostra / nascondi rettangoli di debug face detection |
+| **r** | reset: torna a "originale" e "nessuno" |
+| **q** / **esc** | esci e rilascia la webcam |
 
 ---
 
-## Filtri colore disponibili
+## filtri colore disponibili
 
-| Nome | Effetto |
+| nome | effetto |
 |------|---------|
-| Originale | Nessuna modifica |
-| B&N | Scala di grigi |
-| Negativo | Inversione valori pixel |
-| Seppia | Tonalità calda vintage |
-| Termico | Heatmap INFERNO |
-| Cartoon | Bilateral filter + bordi Canny |
-| Pixelato | Effetto pixel art |
-| Vignetta | Bordi scurati progressivamente |
-| Vintage | Seppia + vignettatura |
-| Sketch | Effetto matita |
+| originale | nessuna modifica |
+| b&n | scala di grigi |
+| negativo | inversione colori |
+| seppia | tono caldo vintage |
+| termico | heatmap inferno |
+| cartoon | bilateral filter + bordi canny |
+| pixelato | pixel art |
+| vintage | seppia + vignettatura |
+| sketch | effetto matita |
 
-## Filtri facciali disponibili
+## filtri facciali disponibili
 
-| Nome | Effetto |
+| nome | effetto |
 |------|---------|
-| Nessuno | Solo frame originale |
-| Sfondo blur | Sfoca tutto tranne le facce |
-| Cappello | PNG sovrapposto sopra la testa |
-| Occhiali | PNG posizionato all'altezza degli occhi |
-| Baffi | PNG nella zona mediana inferiore della faccia |
-| Maschera | PNG sull'intera faccia |
-| Ghost | Scia del frame precedente |
-| Movimento | Evidenzia in rosso le zone in movimento |
-| Motion blur | Blur direzionale orizzontale |
+| nessuno | frame originale |
+| sfondo blur | sfoca lo sfondo, faccia nitida |
+| cappello | png sopra la testa (varianti 1–4 con tasti 1-4) |
+| occhiali | png all'altezza degli occhi |
+| baffi | png sotto il naso (varianti 1–4) |
+| maschera | png sull'intera faccia (varianti 1–4) |
+| ghost | scia del frame precedente |
+| movimento | evidenzia in rosso le zone in movimento |
 
 ---
 
-## Struttura del progetto
+## webcam virtuale (per meet, zoom, teams, ecc.)
+
+questa funzione manda il video filtrato a una webcam virtuale sul sistema. poi in meet/zoom selezioni quella webcam invece della tua vera webcam.
+
+### attivazione
+
+1. in `main.py`, cambia questa riga:
+   ```python
+   WEBCAM_VIRTUALE = False
+   ```
+   in:
+   ```python
+   WEBCAM_VIRTUALE = True
+   ```
+
+2. installa pyvirtualcam:
+   ```bash
+   pip install pyvirtualcam
+   ```
+
+3. segui le istruzioni per il tuo sistema operativo qui sotto
+
+### su linux (incluso raspberry pi)
+
+installa il modulo kernel `v4l2loopback` che crea il dispositivo webcam virtuale:
+
+```bash
+sudo apt-get install v4l2loopback-dkms
+sudo modprobe v4l2loopback
+```
+
+verifica che sia stato creato:
+```bash
+ls /dev/video*
+```
+
+dovresti vedere un `/dev/video1` (o simile) in più rispetto a prima. quella è la webcam virtuale.
+
+per renderlo permanente (si carica ad ogni avvio):
+```bash
+echo "v4l2loopback" | sudo tee -a /etc/modules
+```
+
+### su windows
+
+installa **obs studio** (gratuito): durante l'installazione include il driver "obs virtual camera".
+
+poi in `main.py` non devi fare altro, pyvirtualcam lo trova automaticamente.
+
+scarica obs: https://obsproject.com
+
+### su macos
+
+su macos pyvirtualcam richiede obs installato oppure il driver "obs-mac-virtualcam".
+
+scarica obs: https://obsproject.com
+
+### come usarla in google meet / zoom
+
+una volta avviato il programma con `WEBCAM_VIRTUALE = True`:
+
+1. apri google meet (o zoom, teams, ecc.)
+2. vai nelle impostazioni della videocamera
+3. seleziona "obs virtual camera" oppure il dispositivo virtuale che vedi in lista
+4. il feed con i filtri appare direttamente nella videochiamata
+
+---
+
+## struttura del progetto
 
 ```
 progetto/
-├── main.py           # Loop principale, gestione tasti, orchestrazione
-├── filters.py        # Filtri colore (grigio, negativo, cartoon, ecc.)
-├── effects.py        # Effetti con face detection e multi-frame
-├── ui.py             # HUD, barra filtri, etichette facce
-├── run.sh            # Script di avvio automatico
-├── requirements.txt  # Dipendenze Python con versioni
-├── assets/           # PNG RGBA per overlay facciali
-├── scatti/           # Screenshot salvati automaticamente
-└── registrazioni/    # Video registrati
+├── main.py           ← loop principale, gestione tasti, orchestrazione
+├── filters.py        ← filtri colore puri
+├── effects.py        ← effetti con face detection e overlay
+├── ui.py             ← hud, barra filtri, etichette
+├── run.sh            ← script di avvio automatico
+├── requirements.txt  ← dipendenze python
+├── assets/           ← png rgba per gli overlay
+├── scatti/           ← screenshot salvati automaticamente
+└── registrazioni/    ← video registrati
 ```
 
 ---
 
-## Note specifiche per Raspberry Pi
+## note per raspberry pi
 
-### Dipendenza di sistema aggiuntiva
-
-Su Raspberry Pi OS potrebbe servire:
+### dipendenze di sistema aggiuntive
 
 ```bash
 sudo apt-get update
 sudo apt-get install -y python3-dev libatlas-base-dev
 ```
 
-### Webcam USB
-
-Verificare che la webcam sia riconosciuta:
+### verifica webcam usb
 
 ```bash
 ls /dev/video*
 ```
 
-Se appare `/dev/video0` la webcam è disponibile.
+se compare `/dev/video0` la webcam è riconosciuta.
 
-### Performance
+### performance
 
-Su Raspberry Pi 4 l'applicazione gira a circa 15–20 FPS con i filtri leggeri. I filtri più pesanti (Cartoon, Sfondo blur) possono scendere a 8–12 FPS. Per migliorare le performance:
+su raspberry pi 4 ci si aspetta circa 15–20 fps con i filtri leggeri. cartoon e sfondo blur sono più pesanti (8–12 fps). per ridurre il carico, puoi abbassare la risoluzione aggiungendo in `main.py` dopo `cap = cv2.VideoCapture(0)`:
 
-1. Ridurre la risoluzione della webcam nel codice:
-   ```python
-   cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-   cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-   ```
-2. Usare l'ambiente `venv` come da script `run.sh` — evita conflitti con i pacchetti di sistema.
-
-### Display
-
-Se si usa Raspberry Pi senza desktop (headless), è necessario un display collegato via HDMI o la variabile `DISPLAY` configurata correttamente. L'app non supporta modalità headless.
+```python
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+```
