@@ -39,8 +39,8 @@ def disegna_hud(frame, nome_colore, nome_filtro, n_facce, fps, recording):
                 (w // 2, 58), cv2.FONT_HERSHEY_SIMPLEX, 0.6, BIANCO, 1, cv2.LINE_AA)
 
     # terza riga: promemoria tasti
-    cv2.putText(frame, "C=colore  F=filtro  1-4=variante  S=foto  V=video  D=debug  R=reset  Q=esci",
-                (10, 83), cv2.FONT_HERSHEY_SIMPLEX, 0.36, GRIGIO, 1, cv2.LINE_AA)
+    cv2.putText(frame, "C=colore  F=filtro  1-4=var  +/-=sensibilità  S=foto  V=video  D=debug  R=reset  Q=esci",
+                (10, 83), cv2.FONT_HERSHEY_SIMPLEX, 0.33, GRIGIO, 1, cv2.LINE_AA)
 
     # pallino rosso + scritta REC nell'angolo in alto a destra, solo se si sta registrando
     if recording:

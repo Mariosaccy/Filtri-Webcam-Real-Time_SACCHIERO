@@ -33,7 +33,7 @@ from ui import disegna_hud, disegna_barra_filtri, disegna_etichette
 #  su linux richiede anche il modulo v4l2loopback (vedi readme)
 # ─────────────────────────────────────────────
 
-WEBCAM_VIRTUALE = True   # cambia in True per attivare la webcam virtuale
+WEBCAM_VIRTUALE = False   # cambia in True per attivare la webcam virtuale
 
 # prova a importare pyvirtualcam solo se l'utente vuole usarla
 cam_virtuale = None
@@ -113,7 +113,14 @@ def main():
     show_debug = False
 
     # il frame precedente serve per ghost e rilevamento movimento
+    # importante: salviamo il frame GREZZO (senza filtri) altrimenti il confronto
+    # cambia sempre anche quando non ci muoviamo, e tutto diventa rosso
     frame_precedente = None
+
+    # soglia di sensibilità per il rilevamento movimento (0-255)
+    # bassa = rileva anche piccoli movimenti, alta = solo movimenti grandi
+    # si regola con i tasti + e - mentre il filtro movimento è attivo
+    soglia_movimento = 25
 
     # coda degli ultimi 30 tempi di frame per calcolare gli fps reali
     tempi_frame = deque(maxlen=30)
@@ -147,6 +154,11 @@ def main():
         # capovolgi orizzontalmente: così sembra uno specchio (più naturale per una webcam)
         frame = cv2.flip(frame, 1)
 
+        # salva il frame grezzo qui, PRIMA di applicare qualsiasi filtro
+        # serve per ghost e movimento: confrontare frame già filtrati darebbe risultati sbagliati
+        # (es. l'hud che cambia ogni frame farebbe diventare tutto rosso anche da fermi)
+        frame_grezzo = frame.copy()
+
         # rileva i volti nel frame corrente
         facce = rileva_facce(frame)
 
@@ -172,10 +184,12 @@ def main():
             frame = metti_maschera(frame, facce, variante)
 
         elif tipo == "ghost":
+            # usa il frame grezzo precedente, non quello filtrato
             frame = ghost_effect(frame, frame_precedente)
 
         elif tipo == "movimento":
-            frame = rilevamento_movimento(frame, frame_precedente)
+            # usa il frame grezzo precedente e la soglia regolabile con + e -
+            frame = rilevamento_movimento(frame, frame_precedente, soglia_movimento)
 
         # ── mostra i rettangoli di debug (solo se D è premuto) ──
         if show_debug:
@@ -215,8 +229,10 @@ def main():
         # ── mostra il frame finale nella finestra ─────────────────
         cv2.imshow("filtri webcam ar", frame)
 
-        # salva il frame come "frame precedente" per il prossimo ciclo
-        frame_precedente = frame.copy()
+        # salva il frame GREZZO (senza filtri e senza hud) come riferimento per il prossimo ciclo
+        # usare frame_grezzo invece di frame evita che i testi e colori dell'hud
+        # vengano interpretati come "movimento" nel frame successivo
+        frame_precedente = frame_grezzo
 
         # ── calcolo fps reali ─────────────────────────────────────
         tempi_frame.append(time.perf_counter() - t_inizio)
@@ -250,7 +266,18 @@ def main():
             idx_colore = 0
             idx_facciale = 0
             variante = 0
+            soglia_movimento = 25
             print("  → reset filtri")
+
+        elif tasto in (ord("+"), ord("=")) and tipo == "movimento":
+            # aumenta la soglia → meno sensibile, rileva solo movimenti grandi
+            soglia_movimento = min(soglia_movimento + 5, 100)
+            print(f"  → soglia movimento: {soglia_movimento} (meno sensibile)")
+
+        elif tasto == ord("-") and tipo == "movimento":
+            # abbassa la soglia → più sensibile, rileva anche piccoli movimenti
+            soglia_movimento = max(soglia_movimento - 5, 5)
+            print(f"  → soglia movimento: {soglia_movimento} (più sensibile)")
 
         elif tasto == ord("d"):
             # mostra/nascondi i rettangoli attorno alle facce rilevate
